@@ -1,7 +1,11 @@
-
 # Generalized Linear Mode Connectivity for Transformers
 
-This repository contains the code used for the Tiny Shakespeare experiments. Multi-model merging and support for other datasets will be added in future releases.
+Official repository for the NeurIPS 2025 paper  
+**[Generalized Linear Mode Connectivity for Transformers](https://openreview.net/pdf/74f91986c42f68d256ffcef1d4a4ee46f7530d3d.pdf)**.
+
+Currently includes the code for the **Tiny Shakespeare experiments**.  
+Support for multi-model merging and additional datasets will be added in future releases.
+
 
 ## Installation
 
