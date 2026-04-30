@@ -20,6 +20,12 @@ import matplotlib.pyplot as plt
 
 from merger import GPTMerger, GPTMergerWrapper
 
+try:
+    import wandb
+    HAS_WANDB = True
+except Exception:
+    HAS_WANDB = False
+
 # Optional safetensors
 try:
     from safetensors.torch import load_file as load_safetensors_file
@@ -145,6 +151,7 @@ def run_eval(
     permutations_only: bool,
     can_vanilla: bool,
     args,
+    run=None,
 ):
     """
     1) Sweep with merger_wrapper BEFORE loading trained state dict  → "Weight matching"
@@ -336,6 +343,51 @@ def run_eval(
     plt.close(fig)
     print(f"📈 Saved loss sweep plot to: {loss_pdf} and {loss_png}")
 
+    # --- W&B logging ---
+    if run is not None:
+        # Table with per-lambda losses for all methods
+        cols = ["lambda", "weight_matching", "learned_matching"]
+        if ys_vanilla is not None:
+            cols.append("vanilla")
+        table = wandb.Table(columns=cols)
+        for i, lam in enumerate(xs):
+            row = [lam, float(ys_weight[i]), float(ys_learned[i])]
+            if ys_vanilla is not None:
+                row.append(float(ys_vanilla[i]))
+            table.add_data(*row)
+        run.log({"loss_sweep": table})
+
+        # Summary scalars: max barrier for each method relative to learned endpoints
+        L0 = ys_learned[0]
+        L1 = ys_learned[-1]
+        span = xs[-1] - xs[0] if xs[-1] != xs[0] else 1.0
+        barriers_learned = ys_learned - (xs * (L1 - L0) / span + L0 - xs[0] * (L1 - L0) / span)
+        run.summary["max_barrier_learned"] = float(np.max(barriers_learned))
+        run.summary["max_barrier_learned_coeff"] = float(xs[np.argmax(barriers_learned)])
+
+        if ys_vanilla is not None:
+            barriers_vanilla = ys_vanilla - (xs * (L1 - L0) / span + L0 - xs[0] * (L1 - L0) / span)
+            run.summary["max_barrier_vanilla"] = float(np.max(barriers_vanilla))
+
+        # Plot image
+        run.log({"loss_interp_plot": wandb.Image(str(loss_png))})
+
+        # Artifact with JSON + plot
+        art = wandb.Artifact(
+            name=f"eval-results-{run.id}",
+            type="eval",
+            metadata={
+                "merged_model_dir": args.merged_model_dir,
+                "permutations_only": permutations_only,
+                "vanilla_supported": bool(can_vanilla),
+            },
+        )
+        art.add_file(json_path)
+        art.add_file(str(loss_pdf))
+        art.add_file(str(loss_png))
+        run.log_artifact(art, aliases=["latest"])
+        print(f"✅ Logged results to W&B run: {run.url}")
+
     return json_path, str(loss_png)
 
 def parse_args():
@@ -377,6 +429,13 @@ def parse_args():
     p.add_argument("--coeff_start", type=float, default=0.0)
     p.add_argument("--coeff_end", type=float, default=1.0)
     p.add_argument("--coeff_step", type=float, default=0.1)
+
+    p.add_argument("--wandb", action="store_true", help="Enable logging to Weights & Biases.")
+    p.add_argument("--wandb_project", type=str, default="gpt2-merging-demo")
+    p.add_argument("--wandb_entity", type=str, default=None)
+    p.add_argument("--wandb_group", type=str, default=None)
+    p.add_argument("--wandb_run_name", type=str, default=None)
+    p.add_argument("--wandb_tags", type=str, default="eval")
 
     return p.parse_args()
 
@@ -457,6 +516,20 @@ def main():
     )
     merger_wrapper = GPTMergerWrapper(config=base0_cpu.config, merger_model=merger_model)
 
+    run = None
+    if args.wandb:
+        if not HAS_WANDB:
+            raise RuntimeError("--wandb passed but wandb is not installed.")
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group,
+            job_type="eval",
+            config=vars(args),
+            tags=[t for t in args.wandb_tags.split(",") if t],
+            name=args.wandb_run_name,
+        )
+
     run_eval(
         merger_wrapper=merger_wrapper,
         vanilla_model=vanilla_model,
@@ -467,7 +540,11 @@ def main():
         permutations_only=permutations_only,
         can_vanilla=can_vanilla,
         args=args,
+        run=run,
     )
+
+    if run is not None:
+        run.finish()
 
 if __name__ == "__main__":
     main()

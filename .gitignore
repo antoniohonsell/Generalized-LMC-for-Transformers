@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# VS Code
+.vscode/
+
+# W&B local logs
+wandb/
+
+# Model checkpoints and training outputs
+gpt2_tinyshakespeare_*/
+merge_seed_*/
+eval_merge_*/
+
+# Dataset splits
+splits_*/
+
+# Token frequency files
+*.pt
+*.pth
+
+# Model weights
+*.safetensors
+*.bin
