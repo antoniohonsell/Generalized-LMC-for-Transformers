@@ -129,9 +129,11 @@ class MuonTrainer(Trainer):
         )
         return self.optimizer
 
-    def training_step(self, model, inputs):
+    def training_step(self, model, inputs, *args, **kwargs):
         # super() handles forward + backward; gradients are ready when it returns.
-        loss = super().training_step(model, inputs)
+        # Forward any extra positional/keyword args (e.g. num_items_in_batch in
+        # newer Transformers versions) so we stay forward-compatible.
+        loss = super().training_step(model, inputs, *args, **kwargs)
         # Step Muon immediately after backward.
         # AdamW is stepped by Trainer's outer loop via self.optimizer.
         self._muon_opt.step()
