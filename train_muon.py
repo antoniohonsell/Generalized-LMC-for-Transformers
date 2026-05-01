@@ -88,17 +88,16 @@ class CombinedOptimizer(torch.optim.Optimizer):
     that a single LR schedule scales each group from its own initial LR.
     """
 
-    def __new__(cls, muon, adamw):
-        obj = object.__new__(cls)
-        return obj
-
     def __init__(self, muon: Muon, adamw: torch.optim.AdamW):
-        self._muon  = muon
-        self._adamw = adamw
-        # Shared dict references — scheduler writes here, sub-optimizers read here
-        self.param_groups = list(muon.param_groups) + list(adamw.param_groups)
-        self.state    = {}
-        self.defaults = {}
+        # Pass combined param groups to Optimizer.__init__ so that internal
+        # hooks, profiling wrappers, and state machinery are properly set up.
+        # The param group dicts are shared by reference, so the LR scheduler
+        # writing to self.param_groups[i]['lr'] is visible to the sub-optimizers.
+        all_groups = list(muon.param_groups) + list(adamw.param_groups)
+        super().__init__(all_groups, defaults={})
+        # Store after super().__init__ to avoid any attribute-order issues
+        self.__dict__["_muon"]  = muon
+        self.__dict__["_adamw"] = adamw
 
     def step(self, closure=None):
         loss = None
@@ -108,10 +107,6 @@ class CombinedOptimizer(torch.optim.Optimizer):
         self._muon.step()
         self._adamw.step()
         return loss
-
-    def zero_grad(self, set_to_none: bool = True):
-        self._muon.zero_grad(set_to_none=set_to_none)
-        self._adamw.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self):
         return {"muon": self._muon.state_dict(), "adamw": self._adamw.state_dict()}
@@ -272,7 +267,7 @@ def main():
     use_fp16 = bool(args.fp16 and torch.cuda.is_available())
     training_args = TrainingArguments(
         output_dir=out_dir,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=args.eval_steps,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
@@ -300,7 +295,7 @@ def main():
     trainer = MuonTrainer(
         model=model,
         args=training_args,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=chunked_train,
         eval_dataset=chunked_val,
         data_collator=data_collator,
