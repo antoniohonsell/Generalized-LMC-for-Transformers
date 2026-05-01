@@ -80,50 +80,23 @@ class Muon(torch.optim.Optimizer):
                 p.add_(update.to(p.dtype), alpha=-lr * scale)
 
 
-class CombinedOptimizer(torch.optim.Optimizer):
-    """
-    Wraps Muon + AdamW as a single optimizer so that HuggingFace Trainer and
-    PyTorch LR schedulers (which do isinstance(opt, Optimizer)) work without
-    modification.  param_groups is a merged view of both sub-optimizers so
-    that a single LR schedule scales each group from its own initial LR.
-    """
-
-    def __init__(self, muon: Muon, adamw: torch.optim.AdamW):
-        # Pass combined param groups to Optimizer.__init__ so that internal
-        # hooks, profiling wrappers, and state machinery are properly set up.
-        # The param group dicts are shared by reference, so the LR scheduler
-        # writing to self.param_groups[i]['lr'] is visible to the sub-optimizers.
-        all_groups = list(muon.param_groups) + list(adamw.param_groups)
-        super().__init__(all_groups, defaults={})
-        # Store after super().__init__ to avoid any attribute-order issues
-        self.__dict__["_muon"]  = muon
-        self.__dict__["_adamw"] = adamw
-
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-        self._muon.step()
-        self._adamw.step()
-        return loss
-
-    def state_dict(self):
-        return {"muon": self._muon.state_dict(), "adamw": self._adamw.state_dict()}
-
-    def load_state_dict(self, state_dict):
-        self._muon.load_state_dict(state_dict["muon"])
-        self._adamw.load_state_dict(state_dict["adamw"])
-
-
 # ── Trainer subclass ──────────────────────────────────────────────────────────
 
 class MuonTrainer(Trainer):
-    """Trainer that uses Muon for 2-D weight matrices and AdamW for everything else."""
+    """
+    Trainer that uses Muon for 2-D weight matrices and AdamW for everything else.
+
+    Rather than wrapping both optimizers into one (which fights with how HF
+    Trainer / accelerate internally manages optimizers), we give Trainer a plain
+    AdamW for its native optimizer slot and step Muon manually right after the
+    backward pass inside training_step — at which point gradients are ready and
+    we still own the call stack.
+    """
 
     def __init__(self, *args, muon_lr: float = 0.02, muon_momentum: float = 0.95, **kwargs):
         self._muon_lr       = muon_lr
         self._muon_momentum = muon_momentum
+        self._muon_opt      = None  # created in create_optimizer
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self):
@@ -137,8 +110,6 @@ class MuonTrainer(Trainer):
                 continue
             seen_ids.add(id(param))
 
-            # Muon for 2-D weight matrices in the transformer body only;
-            # embeddings (wte/wpe) and lm_head use AdamW.
             if (param.ndim == 2
                     and "wte"    not in name
                     and "wpe"    not in name
@@ -147,17 +118,25 @@ class MuonTrainer(Trainer):
             else:
                 adamw_params.append(param)
 
-        muon = Muon(muon_params, lr=self._muon_lr, momentum=self._muon_momentum)
-        adamw = torch.optim.AdamW(
+        # Muon is stepped manually in training_step; Trainer owns AdamW.
+        self._muon_opt = Muon(muon_params, lr=self._muon_lr, momentum=self._muon_momentum)
+        self.optimizer = torch.optim.AdamW(
             adamw_params,
             lr=self.args.learning_rate,
             betas=(0.9, 0.999),
             eps=1e-8,
             weight_decay=self.args.weight_decay,
         )
-
-        self.optimizer = CombinedOptimizer(muon, adamw)
         return self.optimizer
+
+    def training_step(self, model, inputs):
+        # super() handles forward + backward; gradients are ready when it returns.
+        loss = super().training_step(model, inputs)
+        # Step Muon immediately after backward.
+        # AdamW is stepped by Trainer's outer loop via self.optimizer.
+        self._muon_opt.step()
+        self._muon_opt.zero_grad()
+        return loss
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
